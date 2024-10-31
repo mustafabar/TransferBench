@@ -334,7 +334,7 @@ static void init_device_paths_and_build_pcie_tree()
 }
 
 static int get_closest_rdma_nic_id(int hipDeviceId, bool useTopoTree = true)
-{   
+{
   char hipPciBusId[64];
   hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), hipDeviceId);
   if (err != hipSuccess) 
@@ -434,14 +434,53 @@ static void init_device_mappings()
   }
   else 
   {
+    std::set<int> detected_nearest;
     for (int i = 0; i < GpuCount; ++i)
     {
       int closestIbDevice = get_closest_rdma_nic_id(i);
+      detected_nearest.insert(closestIbDevice);
       GpuToNicMapper[i] = closestIbDevice;
       if(closestIbDevice >= 0)
       {
         assert(closestIbDevice < NicToGpuMapper.size());
         NicToGpuMapper[closestIbDevice].insert(i);
+      }      
+    }
+    if(GpuCount % detected_nearest.size() == 0 && GpuCount > detected_nearest.size())
+    {
+      int load_size = GpuCount / detected_nearest.size();
+      // Greedy algorithm to load balance the GpuToNic assignment
+      for (int i = 0; i < GpuCount; ++i)
+      {
+        int closestIbDevice = GpuToNicMapper[i];
+        while(NicToGpuMapper[closestIbDevice].size() < load_size)
+        {
+          if(i + 1 < GpuCount) 
+          {
+            int nextClosestIbDevice = GpuToNicMapper[i + 1];
+            if(NicToGpuMapper[nextClosestIbDevice].size() > load_size)
+            {
+              auto gpuToMove = NicToGpuMapper[nextClosestIbDevice].begin();
+              NicToGpuMapper[closestIbDevice].insert(*gpuToMove);
+              NicToGpuMapper[nextClosestIbDevice].erase(gpuToMove);
+              GpuToNicMapper[*gpuToMove] = closestIbDevice;
+            }
+          }
+        }
+        while(NicToGpuMapper[closestIbDevice].size() > load_size)
+        {
+          if(i + 1 < GpuCount) 
+          {
+            int nextClosestIbDevice = GpuToNicMapper[i + 1];
+            if(NicToGpuMapper[nextClosestIbDevice].size() < load_size)
+            {
+              auto gpuToMove = NicToGpuMapper[closestIbDevice].begin();
+              NicToGpuMapper[nextClosestIbDevice].insert(*gpuToMove);
+              NicToGpuMapper[closestIbDevice].erase(gpuToMove);
+              GpuToNicMapper[*gpuToMove] = nextClosestIbDevice;
+            }
+          }
+        }
       }
     }
   }  
