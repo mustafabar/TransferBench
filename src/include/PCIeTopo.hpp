@@ -446,7 +446,9 @@ static void init_device_mappings()
         NicToGpuMapper[closestIbDevice].insert(i);
       }      
     }
-    if(GpuCount % detected_nearest.size() == 0 && GpuCount > detected_nearest.size())
+    if(detected_nearest.size() > 0 && GpuCount > 0 && 
+       GpuCount % detected_nearest.size() == 0     &&
+       GpuCount > detected_nearest.size())
     {
       int load_size = GpuCount / detected_nearest.size();
       // Greedy algorithm to load balance the GpuToNic assignment
@@ -465,6 +467,14 @@ static void init_device_mappings()
               NicToGpuMapper[nextClosestIbDevice].erase(gpuToMove);
               GpuToNicMapper[*gpuToMove] = closestIbDevice;
             }
+            else 
+            {
+              break;
+            }
+          }
+          else 
+          {
+            break;
           }
         }
         while(NicToGpuMapper[closestIbDevice].size() > load_size)
@@ -479,6 +489,14 @@ static void init_device_mappings()
               NicToGpuMapper[closestIbDevice].erase(gpuToMove);
               GpuToNicMapper[*gpuToMove] = nextClosestIbDevice;
             }
+            else 
+            {
+              break;
+            }
+          }
+          else
+          {
+            break;
           }
         }
       }
