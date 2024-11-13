@@ -24,7 +24,7 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
 // Helper macro for catching RDMA errors
 #define IBV_CALL(__func__, ...)                                                     \
   do {                                                                              \
-    int error = func(__VA_ARGS__);                                                  \
+    int error = __func__(__VA_ARGS__);                                              \
     if (error != 0)                                                                 \
     {                                                                               \
       std::cerr << "Encountered RDMA error " << error << " at line " << __LINE__    \
@@ -36,7 +36,7 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
 // Helper macro for catching RDMA null return errors
 #define IBV_PTR_CALL(__ptr__, __func__, ...)                                        \
   do {                                                                              \
-    __ptr__ = func(__VA_ARGS__);                                                    \
+    __ptr__ = __func__(__VA_ARGS__);                                                \
     if (__ptr__ == NULL)                                                            \
     {                                                                               \
       std::cerr << "Encountered RDMA Null Pointer at line " << __LINE__             \
