@@ -22,25 +22,25 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
 
 
 // Helper macro for catching RDMA errors
-#define IBV_CALL(func, ...)                                                         \
+#define IBV_CALL(__func__, ...)                                                     \
   do {                                                                              \
     int error = func(__VA_ARGS__);                                                  \
     if (error != 0)                                                                 \
     {                                                                               \
       std::cerr << "Encountered RDMA error " << error << " at line " << __LINE__    \
-            << " in file " << __FILE__ << " during " << #func << "\n";              \
+            << " in file " << __FILE__ << " during " << #__func__ << "\n";          \
       exit(-1);                                                                     \
     }                                                                               \
   } while (0)
 
 // Helper macro for catching RDMA null return errors
-#define IBV_PTR_CALL(ptr, func, ...)                                                \
+#define IBV_PTR_CALL(__ptr__, __func__, ...)                                        \
   do {                                                                              \
-    ptr = func(__VA_ARGS__);                                                        \
-    if (ptr == NULL)                                                                \
+    __ptr__ = func(__VA_ARGS__);                                                    \
+    if (__ptr__ == NULL)                                                            \
     {                                                                               \
       std::cerr << "Encountered RDMA Null Pointer at line " << __LINE__             \
-      << " in file " << __FILE__ << " during " << #func << "\n";                    \
+      << " in file " << __FILE__ << " during " << #__func__ << "\n";                \
       exit(-1);                                                                     \
     }                                                                               \
   } while (0)
