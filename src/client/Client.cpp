@@ -230,15 +230,16 @@ void PrintResults(EnvVars const& ev, int const testNum,
       char exeSubIndexStr[32] = "";
       if (t.exeSubIndex != -1)
         sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
+      int subExecOrDstExec = IsRdmaExeType(exeType) ? r.exeDstIndex : t.numSubExecs;
       printf("     Transfer %02d  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%03d%s:%03d -> %s\n",
-             idx,                    sep,
-             r.avgBandwidthGbPerSec, sep,
-             r.avgDurationMsec,      sep,
-             r.numBytes,             sep,
-             MemDevicesToStr(t.srcs).c_str(),
-             ExeTypeName[t.exeDevice.exeType], t.exeDevice.exeIndex,
-             exeSubIndexStr, t.numSubExecs,
-             MemDevicesToStr(t.dsts).c_str());
+            idx,                    sep,
+            r.avgBandwidthGbPerSec, sep,
+            r.avgDurationMsec,      sep,
+            r.numBytes,             sep,
+            MemDevicesToStr(t.srcs).c_str(),
+            ExeTypeName[exeType], exeIndex,
+            exeSubIndexStr, subExecOrDstExec,
+            MemDevicesToStr(t.dsts).c_str());
 
       // Show per-iteration timing information
       if (ev.showIterations) {

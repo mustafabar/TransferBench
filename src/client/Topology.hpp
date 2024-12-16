@@ -24,6 +24,11 @@ THE SOFTWARE.
 
 #include "TransferBench.hpp"
 
+#ifndef NO_IBV_EXEC
+#include <infiniband/verbs.h>
+#include <filesystem>
+#endif
+
 static int RemappedCpuIndex(int origIdx)
 {
   static std::vector<int> remappingCpu;
@@ -40,70 +45,70 @@ static int RemappedCpuIndex(int origIdx)
 
 static void PrintNicToGPUTopo(bool outputToCsv)
 {
-#ifdef NIC_EXEC_ENABLED
-  printf("Device Index | Device Name | Port Active | Closest GPU(s) | PCIe Bus ID\n");
-  if(!outputToCsv)
-    printf("-------------+-------------+-------------+----------------+------------\n");
-
-  std::vector<std::string> devBusIds;
-  std::vector<std::string> devNames;
-  std::vector<bool> devPortsActive;
-  int devCount;
-  struct ibv_device **deviceList = ibv_get_device_list(&devCount);
-  if (deviceList && devCount > 0) {
-    devBusIds.resize(devCount, "");
-    devNames.resize(devCount, "");
-    devPortsActive.resize(devCount, false);
-    for (int i = 0; i < devCount; ++i) {
-      struct ibv_context *ctx = ibv_open_device(deviceList[i]);
-      if (ctx) {
-        struct ibv_device_attr deviceAttr;
-        if (ibv_query_device(ctx, &deviceAttr) == 0) {
-          devNames[i] = deviceList[i]->name;
-          for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
-            struct ibv_port_attr portAttr;
-            if (ibv_query_port(ctx, port, &portAttr) == 0 && portAttr.state == IBV_PORT_ACTIVE) {
-              devPortsActive[i] = true;
-              break;
+#ifndef NO_IBV_EXEC
+    printf("Device Index | Device Name | Port Active | Closest GPU(s) | PCIe Bus ID\n");
+    if(!outputToCsv) {
+      printf("-------------+-------------+-------------+----------------+------------\n");
+    }
+    std::vector<std::string> devBusIds;
+    std::vector<std::string> devNames;
+    std::vector<bool> devPortsActive;
+    int devCount;
+    struct ibv_device **deviceList = ibv_get_device_list(&devCount);
+    if (deviceList && devCount > 0) {
+      devBusIds.resize(devCount, "");
+      devNames.resize(devCount, "");
+      devPortsActive.resize(devCount, false);
+      for (int i = 0; i < devCount; ++i) {
+        struct ibv_context *ctx = ibv_open_device(deviceList[i]);
+        if (ctx) {
+          struct ibv_device_attr deviceAttr;
+          if (ibv_query_device(ctx, &deviceAttr) == 0) {
+            devNames[i] = deviceList[i]->name;
+            for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
+              struct ibv_port_attr portAttr;
+              if (ibv_query_port(ctx, port, &portAttr) == 0 && portAttr.state == IBV_PORT_ACTIVE) {
+                devPortsActive[i] = true;
+                break;
+              }
             }
           }
-        }
 
-        std::string devicePath(deviceList[i]->dev_path);
-        if (std::filesystem::exists(devicePath)) {
-          std::string pciPath = std::filesystem::canonical(devicePath + "/device").string();
-          std::size_t pos = pciPath.find_last_of('/');
-          if (pos != std::string::npos) {
-            std::string nicBusId = pciPath.substr(pos + 1);
-            devBusIds[i] = nicBusId;
+          std::string devicePath(deviceList[i]->dev_path);
+          if (std::filesystem::exists(devicePath))
+          {
+            std::string pciPath = std::filesystem::canonical(devicePath + "/device").string();
+            std::size_t pos = pciPath.find_last_of('/');
+            if (pos != std::string::npos) {
+              std::string nicBusId = pciPath.substr(pos + 1);
+              devBusIds[i] = nicBusId;
+            }
           }
+          ibv_close_device(ctx);
         }
-        ibv_close_device(ctx);
       }
+      ibv_free_device_list(deviceList);
     }
-    ibv_free_device_list(deviceList);
-  }
+    for (int i = 0; i < devBusIds.size(); ++i)
+    {
+      std::string nicDevice = devNames[i];
+      bool portActive = devPortsActive[i];
 
-  int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
-  for (int i = 0; i < devBusIds.size(); ++i) {
-    std::string nicDevice = devNames[i];
-    bool portActive = devPortsActive[i];
-
-    std::string closestGpusStr = "";
-    for (int j = 0; j < numGpus; j++) {
-      if (TransferBench::GetClosestNicToGpu(j) == i) {
-        if (closestGpusStr != "") closestGpusStr += ",";
-        closestGpusStr += std::to_string(j);
+      auto closestGpus = TransferBench::GetClosestGpusToNic(i);
+      std::string closestGpusStr;
+      for (size_t j = 0; j < closestGpus.size(); ++j) {
+        if (j) closestGpusStr += ",";
+        closestGpusStr += std::to_string(closestGpus[j]);
       }
-    }
 
-    printf("%-12d | %-11s | %-11s | %-14s | %-11s\n",
-           i, nicDevice.c_str(),
-           portActive ? "Yes" : "No",
-           closestGpusStr.c_str(),
-           devBusIds[i].c_str());
-  }
-  printf("\n");
+      printf("%-12d | %-11s | %-11s | %-13s | %-11s\n",
+             i, nicDevice.c_str(),
+             portActive ? "Yes" : "No",
+             closestGpusStr.c_str(),
+             devBusIds[i].c_str());
+
+    }
+    printf("\n");
 #endif
 }
 
