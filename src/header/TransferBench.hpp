@@ -3071,18 +3071,11 @@ namespace {
 
     int subIterations = 0;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
-      // if (cfg.dma.useHipEvents)
-      //   ERR_CHECK(hipEventRecord(startEvent, stream));
-
       // Use hipMemcpy
       do {
         ERR_CHECK(hipMemcpyAsync(resources.dstMem[0], resources.srcMem[0], resources.numBytes,
                                  hipMemcpyDefault, stream));
       } while (++subIterations != cfg.general.numSubIterations);
-
-      // if (cfg.dma.useHipEvents)
-      //   ERR_CHECK(hipEventRecord(stopEvent, stream));
-      // ERR_CHECK(hipStreamSynchronize(stream));
     } else {
 #if defined(__NVCC__)
       return {ERR_FATAL, "HSA copy not supported on NVIDIA hardware"};
@@ -3102,10 +3095,6 @@ namespace {
                                                        resources.signal,
                                                        resources.sdmaEngineId, true));
         }
-        // Wait for SDMA transfer to complete
-        // while(hsa_signal_wait_scacquire(resources.signal,
-        //                                 HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
-        //                                 HSA_WAIT_STATE_ACTIVE) >= 1);
       } while (++subIterations != cfg.general.numSubIterations);
 #endif
     }
