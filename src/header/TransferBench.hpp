@@ -3067,12 +3067,12 @@ namespace {
                                       ConfigOptions const& cfg,
                                       TransferResources&   resources)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+   // auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int subIterations = 0;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
-      if (cfg.dma.useHipEvents)
-        ERR_CHECK(hipEventRecord(startEvent, stream));
+      // if (cfg.dma.useHipEvents)
+      //   ERR_CHECK(hipEventRecord(startEvent, stream));
 
       // Use hipMemcpy
       do {
@@ -3080,9 +3080,9 @@ namespace {
                                  hipMemcpyDefault, stream));
       } while (++subIterations != cfg.general.numSubIterations);
 
-      if (cfg.dma.useHipEvents)
-        ERR_CHECK(hipEventRecord(stopEvent, stream));
-      ERR_CHECK(hipStreamSynchronize(stream));
+      // if (cfg.dma.useHipEvents)
+      //   ERR_CHECK(hipEventRecord(stopEvent, stream));
+      // ERR_CHECK(hipStreamSynchronize(stream));
     } else {
 #if defined(__NVCC__)
       return {ERR_FATAL, "HSA copy not supported on NVIDIA hardware"};
@@ -3103,26 +3103,26 @@ namespace {
                                                        resources.sdmaEngineId, true));
         }
         // Wait for SDMA transfer to complete
-        while(hsa_signal_wait_scacquire(resources.signal,
-                                        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
-                                        HSA_WAIT_STATE_ACTIVE) >= 1);
+        // while(hsa_signal_wait_scacquire(resources.signal,
+        //                                 HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+        //                                 HSA_WAIT_STATE_ACTIVE) >= 1);
       } while (++subIterations != cfg.general.numSubIterations);
 #endif
     }
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    // auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    // double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
 
-    if (iteration >= 0) {
-      double deltaMsec = cpuDeltaMsec;
-      if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
-        float gpuDeltaMsec;
-        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-        deltaMsec = gpuDeltaMsec;
-      }
-      resources.totalDurationMsec += deltaMsec;
-      if (cfg.general.recordPerIteration)
-        resources.perIterMsec.push_back(deltaMsec);
-    }
+    // if (iteration >= 0) {
+    //   double deltaMsec = cpuDeltaMsec;
+    //   if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
+    //     float gpuDeltaMsec;
+    //     ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+    //     deltaMsec = gpuDeltaMsec;
+    //   }
+    //   resources.totalDurationMsec += deltaMsec;
+    //   if (cfg.general.recordPerIteration)
+    //     resources.perIterMsec.push_back(deltaMsec);
+    // }
     return ERR_NONE;
   }
 
@@ -3132,25 +3132,66 @@ namespace {
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteDmaTransfer,
-                                             iteration,
-                                             exeInfo.useSubIndices,
-                                             exeInfo.streams[i],
-                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
-                                             std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
-    }
+    int subIterations = 0;
 
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+      auto cpuStart = std::chrono::high_resolution_clock::now();
+      size_t completedTransfers = 0;
+      auto transferCount = exeInfo.resources.size();
+      std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
+      std::vector<uint16_t> completed(transferCount);
 
+      for (auto i = 0; i < transferCount; i++) {
+        transferTimers[i] = std::chrono::high_resolution_clock::now();
+        if (cfg.dma.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.startEvents[i], exeInfo.streams[i]));
+        ERR_CHECK(ExecuteDmaTransfer(iteration, exeInfo.useSubIndices,
+                                     exeInfo.streams[i],
+                                     cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                     cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                     std::cref(cfg),
+                                     std::ref(exeInfo.resources[i])));
+        if (cfg.dma.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.stopEvents[i], exeInfo.streams[i]));
+      }
+      do {
+        do {
+          if (!exeInfo.useSubIndices && !cfg.dma.useHsaCopy) {
+            for(auto i = 0; i < transferCount; i++) {
+              ERR_CHECK(hipStreamSynchronize(exeInfo.streams[i]));
+              completedTransfers++;
+              auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
+              double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+              if (!exeInfo.useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
+                float gpuDeltaMsec;
+                ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[i], exeInfo.stopEvents[i]));
+                deltaMsec = gpuDeltaMsec;
+              }
+              if (iteration >= 0) {
+                exeInfo.resources[i].totalDurationMsec += deltaMsec;
+                if (cfg.general.recordPerIteration)
+                  exeInfo.resources[i].perIterMsec.push_back(deltaMsec);
+              }
+            }
+          } else {
+            for(auto i = 0; i < transferCount; i++) {
+              if(hsa_signal_wait_scacquire(exeInfo.resources[i].signal,
+                HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+                HSA_WAIT_STATE_ACTIVE) < 1)  {
+                  auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
+                  double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+                  if (iteration >= 0) {
+                    exeInfo.resources[i].totalDurationMsec += deltaMsec;
+                    if (cfg.general.recordPerIteration)
+                      exeInfo.resources[i].perIterMsec.push_back(deltaMsec);
+                  }
+                  completedTransfers++;
+                }
+            }
+          }
+        }  while(completedTransfers < transferCount);
+    } while(++subIterations < cfg.general.numSubIterations);
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
     if (iteration >= 0)
