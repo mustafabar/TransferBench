@@ -5,6 +5,7 @@
 # Configuration options
 ROCM_PATH ?= /opt/rocm
 CUDA_PATH ?= /usr/local/cuda
+MPI_PATH ?= /opt/ompi
 
 HIPCC=$(ROCM_PATH)/bin/hipcc
 NVCC=$(CUDA_PATH)/bin/nvcc
@@ -16,7 +17,7 @@ else
   EXE=TransferBench
 endif
 
-CXXFLAGS = -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
+CXXFLAGS = -I$(ROCM_PATH)/include -I$(MPI_PATH)/include -DMULTINODE_RDMA -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -L$(MPI_PATH)/lib -lmpi
 NVFLAGS  = -x cu -lnuma -arch=native
 COMMON_FLAGS = -O3 -I./src/header -I./src/client -I./src/client/Presets
 LDFLAGS += -lpthread

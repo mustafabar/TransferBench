@@ -46,6 +46,9 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <filesystem>
 #include <fstream>
+#ifdef MULTINODE_RDMA
+#include <mpi.h>
+#endif
 #endif
 
 #if defined(__NVCC__)
@@ -1328,6 +1331,11 @@ namespace {
 #ifdef NIC_EXEC_ENABLED
     int                        srcNicIndex;       ///< SRC NIC index
     int                        dstNicIndex;       ///< DST NIC index
+    int                        srcNode;           ///< SRC Node index
+    int                        dstNode;           ///< DST Node index
+    /*TODO: not transfer specific*/
+    int                        mpiRank;           ///< MPI rank of this transfer
+    int                        mpiSize;           ///< MPI size of this transfer
     ibv_context*               srcContext;        ///< Device context for SRC NIC
     ibv_context*               dstContext;        ///< Device context for DST NIC
     ibv_pd*                    srcProtect;        ///< Protection domain for SRC NIC
@@ -1352,7 +1360,25 @@ namespace {
     vector<double>             perIterMsec;       ///< Duration for each individual iteration
     vector<set<pair<int,int>>> perIterCUs;        ///< GFX-Executor only. XCC:CU used per iteration
   };
-
+#ifdef NIC_EXEC_ENABLED
+#ifdef MULTINODE_RDMA
+  union RemoteNicData
+  {
+    u_int8_t raw[37];
+    struct {
+      u_int64_t                  subnetPrefix;       ///< Subnet prefix for the remote NIC
+      u_int64_t                  interfaceId;        ///< Interface ID for the remote NIC
+      u_int8_t                   gidIndex;           ///< GID index for the remote NIC
+      u_int8_t                   portNum;            ///< Port number for the remote NIC
+      u_int32_t                  dstQpNum;           ///< Destination queue pair number for the remote NIC
+      u_int8_t                   linkLayer;          ///< Link layer for the remote NIC
+      u_int64_t                  remoteMemoryAddress;///< Link layer for the remote NIC
+      u_int32_t                  rKey;               ///< Remote memory key for remote NIC
+      u_int16_t                  lid;                ///< LID for remote NIC port
+    } data;
+  };
+#endif
+#endif
   // Internal resources allocated per Executor
   struct ExeInfo
   {
@@ -1722,7 +1748,8 @@ namespace {
   static ErrResult TransitionQpToRtr(ibv_qp*         qp,
                                      uint16_t const& dlid,
                                      uint32_t const& dqpn,
-                                     ibv_gid  const& gid,
+                                     uint64_t const& subnetPrefix,
+                                     uint64_t const& interfaceId,
                                      uint8_t  const& gidIndex,
                                      uint8_t  const& port,
                                      bool     const& isRoCE,
@@ -1737,8 +1764,8 @@ namespace {
     attr.min_rnr_timer      = 12;
     if (isRoCE) {
       attr.ah_attr.is_global                     = 1;
-      attr.ah_attr.grh.dgid.global.subnet_prefix = gid.global.subnet_prefix;
-      attr.ah_attr.grh.dgid.global.interface_id  = gid.global.interface_id;
+      attr.ah_attr.grh.dgid.global.subnet_prefix = subnetPrefix;
+      attr.ah_attr.grh.dgid.global.interface_id  = interfaceId;
       attr.ah_attr.grh.flow_label                = 0;
       attr.ah_attr.grh.sgid_index                = gidIndex;
       attr.ah_attr.grh.hop_limit                 = 255;
@@ -1969,6 +1996,29 @@ namespace {
     rss.dstNicIndex = dstExeDevice.exeIndex;
     rss.qpCount     = t.numSubExecs;
 
+    //InitDeviceList();
+    int commSize = 1;
+    int commRank = 0;
+    int srcNode = 0;
+    int dstNode = 0;
+#ifdef MULTINODE_RDMA
+    int initialized, finalized;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+      MPI_Init(NULL, NULL);
+    }
+    MPI_Comm_size(MPI_COMM_WORLD, &commSize);
+    MPI_Comm_rank(MPI_COMM_WORLD, &commRank);
+    if(commSize > 2) {
+      return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
+    }
+    if(commSize == 2) dstNode = 1;
+
+#endif
+    rss.srcNode = srcNode;
+    rss.dstNode = dstNode;
+    rss.mpiRank = commRank;
+    rss.mpiSize = commSize;
     // Check for valid NICs and active ports
     int numNics = GetNumExecutors(EXE_NIC);
     if (rss.srcNicIndex < 0 || rss.srcNicIndex >= numNics)
@@ -1988,96 +2038,183 @@ namespace {
 
     unsigned int rdmaMemRegFlags = rdmaAccessFlags;
     if (cfg.nic.useRelaxedOrder) rdmaMemRegFlags |= IBV_ACCESS_RELAXED_ORDERING;
-
-    // Open NIC contexts
-    IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
-    IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
-
-    // Open protection domains
-    IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
-    IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
-
-    // Register memory region
-    IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
-    IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
-
-    // Create completion queues
-    IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
-    IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
-
-    // Get port attributes
-    IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
-    IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
-
-
-    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer)
-      return {ERR_FATAL, "SRC NIC (%d) and DST NIC (%d) do not have the same link layer", rss.srcNicIndex, rss.dstNicIndex};
-
-    // Prepare GID index
     int srcGidIndex = cfg.nic.ibGidIndex;
     int dstGidIndex = cfg.nic.ibGidIndex;
+    bool isRoCE = false;
+    // Open NIC contexts
+    // Open protection domains
+    // Register memory region
+    // Create Completion Queues
+    // Get port attributes
+    if(srcNode == commRank) { // if I am the source node
+      IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
+      IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
+      IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
+      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+      IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
+       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
+      isRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
+      // Prepare GID index for RoCE
+      if (isRoCE) {
+        // Try to auto-detect the GID index
+        ERR_CHECK(GetGidIndex(cfg, rss.srcContext, rss.srcPortAttr.gid_tbl_len, srcGidIndex));
+        IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
+      }
+      // Prepare queue pairs and send elements
+      rss.srcQueuePairs.resize(rss.qpCount);
+      rss.sgePerQueuePair.resize(rss.qpCount);
+      rss.sendWorkRequests.resize(rss.qpCount);
 
-    // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
-    bool isRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
-    if (isRoCE) {
-      // Try to auto-detect the GID index
-      ERR_CHECK(GetGidIndex(cfg, rss.srcContext, rss.srcPortAttr.gid_tbl_len, srcGidIndex));
-      ERR_CHECK(GetGidIndex(cfg, rss.dstContext, rss.dstPortAttr.gid_tbl_len, dstGidIndex));
-      IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
-      IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
+      for (int i = 0; i < rss.qpCount; ++i) {
+
+        // Create scatter-gather element for the portion of memory assigned to this queue pair
+        ibv_sge sg = {};
+        sg.addr   = (uint64_t)rss.subExecParamCpu[i].src[0];
+        sg.length = rss.subExecParamCpu[i].N * sizeof(float);
+        sg.lkey   = rss.srcMemRegion->lkey;
+        rss.sgePerQueuePair[i] = sg;
+
+        // Create send work request
+        ibv_send_wr wr = {};
+        wr.wr_id                = i;
+        wr.sg_list              = &rss.sgePerQueuePair[i];
+        wr.num_sge              = 1;
+        wr.opcode               = IBV_WR_RDMA_WRITE;
+        wr.send_flags           = IBV_SEND_SIGNALED;
+        rss.sendWorkRequests[i] = wr;
+      }
     }
-
-    // Prepare queue pairs and send elements
-    rss.srcQueuePairs.resize(rss.qpCount);
-    rss.dstQueuePairs.resize(rss.qpCount);
-    rss.sgePerQueuePair.resize(rss.qpCount);
-    rss.sendWorkRequests.resize(rss.qpCount);
-
+    if(dstNode == commRank) { // if I am the destination node
+      IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
+      IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
+      IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
+      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+      IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
+      // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
+      isRoCE = (rss.dstPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
+      // Prepare GID index for RoCE
+      if (isRoCE) {
+        // Try to auto-detect the GID index
+        ERR_CHECK(GetGidIndex(cfg, rss.dstContext, rss.dstPortAttr.gid_tbl_len, dstGidIndex));
+        IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
+      }
+      rss.dstQueuePairs.resize(rss.qpCount);
+      if(commSize == 1) {
+        for (int i = 0; i < rss.qpCount; ++i) {
+          rss.sendWorkRequests[i].wr.rdma.remote_addr  = (uint64_t)rss.subExecParamCpu[i].dst[0];
+          rss.sendWorkRequests[i].wr.rdma.rkey         = rss.dstMemRegion->rkey;
+        }
+      }
+    }
     for (int i = 0; i < rss.qpCount; ++i) {
+      if(commSize == 1) {
+        // Create SRC/DST queue pairs
+        ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
+        ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
 
-      // Create scatter-gather element for the portion of memory assigned to this queue pair
-      ibv_sge sg = {};
-      sg.addr   = (uint64_t)rss.subExecParamCpu[i].src[0];
-      sg.length = rss.subExecParamCpu[i].N * sizeof(float);
-      sg.lkey   = rss.srcMemRegion->lkey;
-      rss.sgePerQueuePair[i] = sg;
+        // Initialize SRC/DST queue pairs
+        ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
+        ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
 
-      // Create send work request
-      ibv_send_wr wr = {};
-      wr.wr_id                = i;
-      wr.sg_list              = &rss.sgePerQueuePair[i];
-      wr.num_sge              = 1;
-      wr.opcode               = IBV_WR_RDMA_WRITE;
-      wr.send_flags           = IBV_SEND_SIGNALED;
-      wr.wr.rdma.remote_addr  = (uint64_t)rss.subExecParamCpu[i].dst[0];
-      wr.wr.rdma.rkey         = rss.dstMemRegion->rkey;
-      rss.sendWorkRequests[i] = wr;
+        // Transition the SRC queue pair to ready to receive
+        ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], rss.dstPortAttr.lid,
+                                    rss.dstQueuePairs[i]->qp_num,
+                                    rss.dstGid.global.subnet_prefix,
+                                    rss.dstGid.global.interface_id,
+                                    dstGidIndex, port, isRoCE,
+                                    rss.srcPortAttr.active_mtu));
 
-      // Create SRC/DST queue pairs
-      ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
-      ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
+        // Transition the SRC queue pair to ready to send
+        ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
 
-      // Initialize SRC/DST queue pairs
-      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
-      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
+        // Transition the DST queue pair to ready to receive
+        ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], rss.srcPortAttr.lid,
+                                    rss.srcQueuePairs[i]->qp_num,
+                                    rss.srcGid.global.subnet_prefix,
+                                    rss.srcGid.global.interface_id,
+                                    srcGidIndex, port, isRoCE,
+                                    rss.dstPortAttr.active_mtu));
 
-      // Transition the SRC queue pair to ready to receive
-      ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], rss.dstPortAttr.lid,
-                                  rss.dstQueuePairs[i]->qp_num, rss.dstGid,
-                                  dstGidIndex, port, isRoCE,
-                                  rss.srcPortAttr.active_mtu));
+        // Transition the DST queue pair to ready to send
+        ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+      }
+#ifdef MULTINODE_RDMA
+      else if (commSize == 2) {
+        if(srcNode == commRank) {
+          // Create SRC/DST queue pairs
+          ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
 
-      // Transition the SRC queue pair to ready to send
-      ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
+          // Initialize SRC/DST queue pairs
+          ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
+          RemoteNicData localNicData;
+          RemoteNicData remoteNicData;
 
-      // Transition the DST queue pair to ready to receive
-      ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], rss.srcPortAttr.lid,
-                                  rss.srcQueuePairs[i]->qp_num, rss.srcGid,
-                                  srcGidIndex, port, isRoCE,
-                                  rss.dstPortAttr.active_mtu));
+          // Populate local NIC data
+          localNicData.data.subnetPrefix = rss.srcGid.global.subnet_prefix;
+          localNicData.data.interfaceId = rss.srcGid.global.interface_id;
+          localNicData.data.gidIndex = srcGidIndex;
+          localNicData.data.portNum = port;
+          localNicData.data.lid = rss.srcPortAttr.lid;
+          localNicData.data.dstQpNum = rss.srcQueuePairs[i]->qp_num;
+          localNicData.data.linkLayer = rss.srcPortAttr.link_layer;
+          localNicData.data.remoteMemoryAddress = (uint64_t)rss.subExecParamCpu[i].src[0];
+          localNicData.data.rKey = rss.srcMemRegion->rkey;
+          // Send local NIC data to the destination node
+          MPI_Send(localNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 0, MPI_COMM_WORLD);
 
-      // Transition the DST queue pair to ready to send
-      ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+          // Receive remote NIC data from the destination node
+          MPI_Status status;
+          MPI_Recv(remoteNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 0, MPI_COMM_WORLD, &status);
+          // Transition the SRC queue pair to ready to receive
+          ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], remoteNicData.data.lid,
+                        remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix, remoteNicData.data.interfaceId,
+                        remoteNicData.data.gidIndex, port, isRoCE,
+                        rss.srcPortAttr.active_mtu));
+
+          // Transition the SRC queue pair to ready to send
+          ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
+          rss.sendWorkRequests[i].wr.rdma.remote_addr  = remoteNicData.data.remoteMemoryAddress;
+          rss.sendWorkRequests[i].wr.rdma.rkey         = remoteNicData.data.rKey;
+        }
+        if(dstNode == commRank) {
+          // Create SRC/DST queue pairs
+          ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
+
+          // Initialize SRC/DST queue pairs
+          ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
+          RemoteNicData localNicData;
+          RemoteNicData remoteNicData;
+
+          // Populate local NIC data
+          localNicData.data.subnetPrefix = rss.dstGid.global.subnet_prefix;
+          localNicData.data.interfaceId = rss.dstGid.global.interface_id;
+          localNicData.data.gidIndex = dstGidIndex;
+          localNicData.data.portNum = port;
+          localNicData.data.lid = rss.dstPortAttr.lid;
+          localNicData.data.dstQpNum = rss.dstQueuePairs[i]->qp_num;
+          localNicData.data.linkLayer = rss.dstPortAttr.link_layer;
+          localNicData.data.remoteMemoryAddress = (uint64_t)rss.subExecParamCpu[i].dst[0];
+          localNicData.data.rKey = rss.dstMemRegion->rkey;
+          // Receive remote NIC data from the destination node
+          MPI_Status status;
+          MPI_Recv(remoteNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 0, MPI_COMM_WORLD, &status);
+
+          // Send local NIC data to the destination node
+          MPI_Send(localNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 0, MPI_COMM_WORLD);
+
+          // Transition the SRC queue pair to ready to receive
+          ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], remoteNicData.data.lid,
+                        remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix,
+                        remoteNicData.data.interfaceId,
+                        remoteNicData.data.gidIndex, port, isRoCE,
+                        rss.dstPortAttr.active_mtu));
+          // Transition the SRC queue pair to ready to send
+          ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+        }
+      } else {
+        return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
+      }
+#endif
     }
 
     return ERR_NONE;
@@ -2673,11 +2810,19 @@ namespace {
       // post the sends
       for (auto i = 0; i < transferCount; i++) {
         transferTimers[i] = std::chrono::high_resolution_clock::now();
-        ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
+        if(exeInfo.resources[i].srcNode == exeInfo.resources[i].mpiRank)
+          ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
       }
       // poll for completions
       do {
         for (auto i = 0; i < transferCount; i++) {
+          if(exeInfo.resources[i].srcNode != exeInfo.resources[i].mpiRank) {
+            while(true);
+            if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
+              completedTransfers++;
+            }
+            receivedQPs[i] = exeInfo.resources[i].qpCount;
+          }
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
             auto& rss = exeInfo.resources[i];
             // Poll the completion queue until all queue pairs are complete
@@ -2687,7 +2832,7 @@ namespace {
             if (nc > 0) {
               receivedQPs[i]++;
               if (wc.status != IBV_WC_SUCCESS) {
-                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
+                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion. %s", rss.transferIdx, ibv_wc_status_str(wc.status)};
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
