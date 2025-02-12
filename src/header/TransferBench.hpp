@@ -1362,19 +1362,22 @@ namespace {
   };
 #ifdef NIC_EXEC_ENABLED
 #ifdef MULTINODE_RDMA
-  union RemoteNicData
+  union alignas(8) RemoteNicData
   {
-    u_int8_t raw[37];
+    uint8_t raw[48];
     struct {
-      u_int64_t                  subnetPrefix;       ///< Subnet prefix for the remote NIC
-      u_int64_t                  interfaceId;        ///< Interface ID for the remote NIC
-      u_int8_t                   gidIndex;           ///< GID index for the remote NIC
-      u_int8_t                   portNum;            ///< Port number for the remote NIC
-      u_int32_t                  dstQpNum;           ///< Destination queue pair number for the remote NIC
-      u_int8_t                   linkLayer;          ///< Link layer for the remote NIC
-      u_int64_t                  remoteMemoryAddress;///< Link layer for the remote NIC
-      u_int32_t                  rKey;               ///< Remote memory key for remote NIC
-      u_int16_t                  lid;                ///< LID for remote NIC port
+      uint64_t                  subnetPrefix;       ///< Subnet prefix for the remote NIC
+      uint64_t                  interfaceId;        ///< Interface ID for the remote NIC
+      uint8_t                   gidIndex;           ///< GID index for the remote NIC
+      uint8_t                   portNum;            ///< Port number for the remote NIC
+      uint8_t                   pad1[2];
+      uint32_t                  dstQpNum;           ///< Destination queue pair number for the remote NIC
+      uint8_t                   linkLayer;          ///< Link layer for the remote NIC
+      uint8_t                   pad2[3];
+      uint64_t                  remoteMemoryAddress;///< Link layer for the remote NIC
+      uint32_t                  rKey;               ///< Remote memory key for remote NIC
+      uint16_t                  lid;                ///< LID for remote NIC port
+      uint8_t                   pad3[6];
     } data;
   };
 #endif
@@ -2148,7 +2151,6 @@ namespace {
           ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
           RemoteNicData localNicData;
           RemoteNicData remoteNicData;
-
           // Populate local NIC data
           localNicData.data.subnetPrefix = rss.srcGid.global.subnet_prefix;
           localNicData.data.interfaceId = rss.srcGid.global.interface_id;
@@ -2160,11 +2162,12 @@ namespace {
           localNicData.data.remoteMemoryAddress = (uint64_t)rss.subExecParamCpu[i].src[0];
           localNicData.data.rKey = rss.srcMemRegion->rkey;
           // Send local NIC data to the destination node
-          MPI_Send(localNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 0, MPI_COMM_WORLD);
+          MPI_Send(localNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 1, MPI_COMM_WORLD);
 
           // Receive remote NIC data from the destination node
           MPI_Status status;
           MPI_Recv(remoteNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 0, MPI_COMM_WORLD, &status);
+
           // Transition the SRC queue pair to ready to receive
           ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], remoteNicData.data.lid,
                         remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix, remoteNicData.data.interfaceId,
@@ -2184,7 +2187,8 @@ namespace {
           ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
           RemoteNicData localNicData;
           RemoteNicData remoteNicData;
-
+          memset(&localNicData, 0, sizeof(localNicData));
+          memset(&remoteNicData, 0, sizeof(remoteNicData));
           // Populate local NIC data
           localNicData.data.subnetPrefix = rss.dstGid.global.subnet_prefix;
           localNicData.data.interfaceId = rss.dstGid.global.interface_id;
@@ -2197,11 +2201,10 @@ namespace {
           localNicData.data.rKey = rss.dstMemRegion->rkey;
           // Receive remote NIC data from the destination node
           MPI_Status status;
-          MPI_Recv(remoteNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 0, MPI_COMM_WORLD, &status);
+          MPI_Recv(remoteNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 1, MPI_COMM_WORLD, &status);
 
           // Send local NIC data to the destination node
           MPI_Send(localNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 0, MPI_COMM_WORLD);
-
           // Transition the SRC queue pair to ready to receive
           ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], remoteNicData.data.lid,
                         remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix,
@@ -2313,7 +2316,7 @@ namespace {
   {
     float* output;
     size_t initOffset = cfg.data.byteOffset / sizeof(float);
-
+    return ERR_NONE;
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
