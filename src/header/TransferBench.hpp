@@ -1362,7 +1362,7 @@ namespace {
   };
 #ifdef NIC_EXEC_ENABLED
 #ifdef MULTINODE_RDMA
-  union alignas(8) RemoteNicData
+  union alignas(8) RdmaMetaData
   {
     uint8_t raw[48];
     struct {
@@ -2149,8 +2149,8 @@ namespace {
 
           // Initialize SRC/DST queue pairs
           ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
-          RemoteNicData localNicData;
-          RemoteNicData remoteNicData;
+          RdmaMetaData localNicData;
+          RdmaMetaData remoteNicData;
           // Populate local NIC data
           localNicData.data.subnetPrefix = rss.srcGid.global.subnet_prefix;
           localNicData.data.interfaceId = rss.srcGid.global.interface_id;
@@ -2185,8 +2185,8 @@ namespace {
 
           // Initialize SRC/DST queue pairs
           ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
-          RemoteNicData localNicData;
-          RemoteNicData remoteNicData;
+          RdmaMetaData localNicData;
+          RdmaMetaData remoteNicData;
           memset(&localNicData, 0, sizeof(localNicData));
           memset(&remoteNicData, 0, sizeof(remoteNicData));
           // Populate local NIC data
@@ -2316,7 +2316,6 @@ namespace {
   {
     float* output;
     size_t initOffset = cfg.data.byteOffset / sizeof(float);
-    return ERR_NONE;
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
