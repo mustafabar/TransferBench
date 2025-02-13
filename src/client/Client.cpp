@@ -24,6 +24,7 @@ THE SOFTWARE.
 #include "Presets.hpp"
 #include "Topology.hpp"
 #include <fstream>
+#include <mpi.h>
 
 int main(int argc, char **argv) {
 
@@ -309,6 +310,8 @@ void PrintResults(EnvVars const& ev, int const testNum,
          sep, results.avgTotalDurationMsec,
          sep, results.totalBytesTransferred,
          sep, results.overheadMsec);
+
+  MPI_Finalize();
 }
 
 void CheckForError(ErrResult const& error)

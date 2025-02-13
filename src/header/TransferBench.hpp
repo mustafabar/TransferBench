@@ -1353,6 +1353,7 @@ namespace {
     uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
     vector<ibv_sge>            sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<ibv_send_wr>        sendWorkRequests;  ///< Send work requests per queue pair
+    vector<ibv_recv_wr>        recvWorkRequests;  ///< Send work requests per queue pair
 #endif
 
     // Counters
@@ -1696,7 +1697,23 @@ namespace {
     return matches;
   }
 #endif // NIC_EXEC_ENABLED
+#if defined(NIC_EXEC_ENABLED) && defined(MULTINODE_RDMA)
+  // TODO: Handle MPI errors in a wrapper to calls
+  static ErrResult GetMPIRankAndSize(int& rank, int &size) {
+    int initialized, finalized;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+      MPI_Init(NULL, NULL);
+    }
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if(size > 2) {
+      return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
+    }
+    return ERR_NONE;
+  }
 
+#endif
 #ifdef NIC_EXEC_ENABLED
 // IB Verbs-related functions
 //========================================================================================
@@ -2005,18 +2022,8 @@ namespace {
     int srcNode = 0;
     int dstNode = 0;
 #ifdef MULTINODE_RDMA
-    int initialized, finalized;
-    MPI_Initialized(&initialized);
-    if (!initialized) {
-      MPI_Init(NULL, NULL);
-    }
-    MPI_Comm_size(MPI_COMM_WORLD, &commSize);
-    MPI_Comm_rank(MPI_COMM_WORLD, &commRank);
-    if(commSize > 2) {
-      return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
-    }
+    ERR_CHECK(GetMPIRankAndSize(commRank, commSize));
     if(commSize == 2) dstNode = 1;
-
 #endif
     rss.srcNode = srcNode;
     rss.dstNode = dstNode;
@@ -2044,12 +2051,15 @@ namespace {
     int srcGidIndex = cfg.nic.ibGidIndex;
     int dstGidIndex = cfg.nic.ibGidIndex;
     bool isRoCE = false;
+    rss.recvWorkRequests.resize(rss.qpCount);
+    rss.sgePerQueuePair.resize(rss.qpCount);
     // Open NIC contexts
     // Open protection domains
     // Register memory region
     // Create Completion Queues
     // Get port attributes
     if(srcNode == commRank) { // if I am the source node
+      rss.sendWorkRequests.resize(rss.qpCount);
       IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
       IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
       IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
@@ -2065,11 +2075,7 @@ namespace {
       }
       // Prepare queue pairs and send elements
       rss.srcQueuePairs.resize(rss.qpCount);
-      rss.sgePerQueuePair.resize(rss.qpCount);
-      rss.sendWorkRequests.resize(rss.qpCount);
-
       for (int i = 0; i < rss.qpCount; ++i) {
-
         // Create scatter-gather element for the portion of memory assigned to this queue pair
         ibv_sge sg = {};
         sg.addr   = (uint64_t)rss.subExecParamCpu[i].src[0];
@@ -2167,7 +2173,6 @@ namespace {
           // Receive remote NIC data from the destination node
           MPI_Status status;
           MPI_Recv(remoteNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 0, MPI_COMM_WORLD, &status);
-
           // Transition the SRC queue pair to ready to receive
           ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], remoteNicData.data.lid,
                         remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix, remoteNicData.data.interfaceId,
@@ -2202,7 +2207,6 @@ namespace {
           // Receive remote NIC data from the destination node
           MPI_Status status;
           MPI_Recv(remoteNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 1, MPI_COMM_WORLD, &status);
-
           // Send local NIC data to the destination node
           MPI_Send(localNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 0, MPI_COMM_WORLD);
           // Transition the SRC queue pair to ready to receive
@@ -2225,29 +2229,30 @@ namespace {
 
   static ErrResult TeardownNicTransferResources(TransferResources& rss)
   {
+    MPI_Barrier(MPI_COMM_WORLD);
     // Deregister memory regions
-    IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
-    IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
+    if(rss.srcMemRegion) IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
+    if(rss.dstMemRegion) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
 
     // Destroy queue pairs
     for (auto srcQueuePair : rss.srcQueuePairs)
-      IBV_CALL(ibv_destroy_qp, srcQueuePair);
+      if(srcQueuePair) IBV_CALL(ibv_destroy_qp, srcQueuePair);
     rss.srcQueuePairs.clear();
     for (auto dstQueuePair : rss.dstQueuePairs)
-      IBV_CALL(ibv_destroy_qp, dstQueuePair);
+      if(dstQueuePair) IBV_CALL(ibv_destroy_qp, dstQueuePair);
     rss.dstQueuePairs.clear();
 
     // Destroy completion queues
-    IBV_CALL(ibv_destroy_cq, rss.srcCompQueue);
-    IBV_CALL(ibv_destroy_cq, rss.dstCompQueue);
+    if(rss.srcCompQueue) IBV_CALL(ibv_destroy_cq, rss.srcCompQueue);
+    if(rss.dstCompQueue) IBV_CALL(ibv_destroy_cq, rss.dstCompQueue);
 
     // Deallocate protection domains
-    IBV_CALL(ibv_dealloc_pd, rss.srcProtect);
-    IBV_CALL(ibv_dealloc_pd, rss.dstProtect);
+    if(rss.srcProtect) IBV_CALL(ibv_dealloc_pd, rss.srcProtect);
+    if(rss.dstProtect) IBV_CALL(ibv_dealloc_pd, rss.dstProtect);
 
     // Destroy context
-    IBV_CALL(ibv_close_device, rss.srcContext);
-    IBV_CALL(ibv_close_device, rss.dstContext);
+    if(rss.srcContext) IBV_CALL(ibv_close_device, rss.srcContext);
+    if(rss.dstContext) IBV_CALL(ibv_close_device, rss.dstContext);
 
     return ERR_NONE;
   }
@@ -2314,13 +2319,15 @@ namespace {
                                         vector<vector<float>>      const& dstReference,
                                         vector<float>&                    outputBuffer)
   {
+    MPI_Barrier(MPI_COMM_WORLD);
     float* output;
     size_t initOffset = cfg.data.byteOffset / sizeof(float);
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
       size_t N = t.numBytes / sizeof(float);
-
+      // Do not validate NIC transfers on the source node side
+      if(IsNicExeType(t.exeDevice.exeType) && rss->srcNode == rss->mpiRank && rss->mpiSize > 1) continue;
       float const* expected = dstReference[t.srcs.size()].data();
       for (int dstIdx = 0; dstIdx < rss->dstMem.size(); dstIdx++) {
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
@@ -2780,12 +2787,12 @@ namespace {
 
 
     // Loop over each of the queue pairs and post the send
-    ibv_send_wr* badWorkReq;
+    ibv_send_wr* badSendWorkReq;
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-      int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
+      int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badSendWorkReq);
       if (error)
         return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
-          rss.transferIdx, qpIndex, error};
+                rss.transferIdx, qpIndex, error};
     }
     return ERR_NONE;
   }
@@ -2819,7 +2826,6 @@ namespace {
       do {
         for (auto i = 0; i < transferCount; i++) {
           if(exeInfo.resources[i].srcNode != exeInfo.resources[i].mpiRank) {
-            while(true);
             if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
               completedTransfers++;
             }
@@ -2827,10 +2833,9 @@ namespace {
           }
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
             auto& rss = exeInfo.resources[i];
-            // Poll the completion queue until all queue pairs are complete
-            // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
             ibv_wc wc;
-            int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
+            int nc;
+            nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
             if (nc > 0) {
               receivedQPs[i]++;
               if (wc.status != IBV_WC_SUCCESS) {
