@@ -235,7 +235,7 @@ void PrintResults(EnvVars const& ev, int const testNum,
                   TransferBench::TestResults const& results)
 {
 #if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
-  MultiProcessUtils::StartMultiNodePrinting();
+  MultiProcessUtils::StartMultiProcessedPrintingRegion();
 #endif
   char sep = ev.outputToCsv ? ',' : '|';
   size_t numTimedIterations = results.numTimedIterations;
@@ -326,7 +326,7 @@ void PrintResults(EnvVars const& ev, int const testNum,
          sep, results.totalBytesTransferred,
          sep, results.overheadMsec);
 #if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
-  MultiProcessUtils::EndMultiProcessedPrinting();
+  MultiProcessUtils::EndMultiProcessedPrintingRegion();
 #endif
 }
 

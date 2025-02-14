@@ -71,7 +71,7 @@ static void PrintNicToGPUTopo(bool outputToCsv)
 void DisplayTopology(bool outputToCsv)
 {
 #if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
-  MultiProcessUtils::StartMultiNodePrinting();
+  MultiProcessUtils::StartMultiProcessedPrintingRegion();
 #endif
   int numCpus = TransferBench::GetNumExecutors(EXE_CPU);
   int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -196,6 +196,6 @@ void DisplayTopology(bool outputToCsv)
   }
 #endif
 #if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
-  MultiProcessUtils::EndMultiProcessedPrinting();
+  MultiProcessUtils::EndMultiProcessedPrintingRegion();
 #endif
 }

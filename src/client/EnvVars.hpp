@@ -98,14 +98,14 @@ public:
       }
     }
 
-    static void StartMultiNodePrinting() {
+    static void StartMultiProcessedPrintingRegion() {
       InitMpi();
       for(int i = 0; i < mpiRank; i++) {
         MPI_Barrier(MPI_COMM_WORLD);
       }
     }
 
-    static void EndMultiProcessedPrinting() {
+    static void EndMultiProcessedPrintingRegion() {
       InitMpi();
       for(int i = 0; i < mpiSize - mpiRank - 1; i++) {
         MPI_Barrier(MPI_COMM_WORLD);
