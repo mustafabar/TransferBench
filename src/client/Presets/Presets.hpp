@@ -52,6 +52,9 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 
 void DisplayPresets()
 {
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+  if(MultiProcessUtils::GetMpiRank() != 0) return;
+#endif
   printf("\nAvailable Preset Benchmarks:\n");
   printf("============================\n");
   for (auto const& x : presetFuncMap)

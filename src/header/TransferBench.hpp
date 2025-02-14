@@ -2162,7 +2162,7 @@ namespace {
 #ifdef MULTINODE_RDMA
     ERR_CHECK(GetMPIRankAndSize(commRank, commSize));
     if(commSize == 2) dstNode = 1;
-    else {ERR_FATAL, "Multi-node RDMA is only supported for max 2 MPI Processes"};
+    else return {ERR_FATAL, "Multi-node RDMA is only supported for max 2 MPI Processes"};
 #endif
     rss.srcNode = srcNode;
     rss.dstNode = dstNode;

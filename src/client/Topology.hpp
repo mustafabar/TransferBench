@@ -70,6 +70,9 @@ static void PrintNicToGPUTopo(bool outputToCsv)
 
 void DisplayTopology(bool outputToCsv)
 {
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+  MultiProcessUtils::StartMultiNodePrinting();
+#endif
   int numCpus = TransferBench::GetNumExecutors(EXE_CPU);
   int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   int numNics = TransferBench::GetNumExecutors(EXE_NIC);
@@ -191,5 +194,8 @@ void DisplayTopology(bool outputToCsv)
            TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}), sep,
            TransferBench::GetClosestNicToGpu(i));
   }
+#endif
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+  MultiProcessUtils::EndMultiProcessedPrinting();
 #endif
 }

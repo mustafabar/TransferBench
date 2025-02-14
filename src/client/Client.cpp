@@ -38,6 +38,9 @@ int main(int argc, char **argv) {
       DisplayPresets();
     }
     DisplayTopology(ev.outputToCsv);
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+    MultiProcessUtils::Teardown();
+#endif
     exit(0);
   }
 
@@ -58,7 +61,12 @@ int main(int argc, char **argv) {
   }
 
   // Run preset benchmark if requested
-  if (RunPreset(ev, numBytesPerTransfer, argc, argv)) exit(0);
+  if (RunPreset(ev, numBytesPerTransfer, argc, argv)) {
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+    MultiProcessUtils::Teardown();
+#endif
+    exit(0);
+  }
 
   // Read input from command line or configuration file
   std::vector<std::string> lines;
@@ -179,10 +187,16 @@ int main(int argc, char **argv) {
       if (numBytesPerTransfer != 0 || !hasUnspecified) break;
     }
   }
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+  MultiProcessUtils::Teardown();
+#endif
 }
 
 void DisplayUsage(char const* cmdName)
 {
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+  if(MultiProcessUtils::GetMpiRank() != 0) return;
+#endif
   std::string nicSupport = "";
 #if NIC_EXEC_ENABLED
   nicSupport = " (with NIC support)";
@@ -221,6 +235,9 @@ void PrintResults(EnvVars const& ev, int const testNum,
                   std::vector<Transfer> const& transfers,
                   TransferBench::TestResults const& results)
 {
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+  MultiProcessUtils::StartMultiNodePrinting();
+#endif
   char sep = ev.outputToCsv ? ',' : '|';
   size_t numTimedIterations = results.numTimedIterations;
 
@@ -241,7 +258,6 @@ void PrintResults(EnvVars const& ev, int const testNum,
     for (int idx : exeResult.transferIdx) {
       Transfer const& t = transfers[idx];
       TransferResult const& r = results.tfrResults[idx];
-
       char exeSubIndexStr[32] = "";
       if (t.exeSubIndex != -1)
         sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
@@ -310,8 +326,9 @@ void PrintResults(EnvVars const& ev, int const testNum,
          sep, results.avgTotalDurationMsec,
          sep, results.totalBytesTransferred,
          sep, results.overheadMsec);
-
-  MPI_Finalize();
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+  MultiProcessUtils::EndMultiProcessedPrinting();
+#endif
 }
 
 void CheckForError(ErrResult const& error)

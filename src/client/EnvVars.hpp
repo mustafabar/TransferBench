@@ -57,6 +57,67 @@ using namespace TransferBench;
   #define hipGetDeviceCount                                  cudaGetDeviceCount
 #endif
 
+#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#include <mpi.h>
+  class MultiProcessUtils
+  {
+private:
+    static int mpiRank;
+    static int mpiSize;
+    static bool initialized;
+
+public:
+    static void InitMpi() {
+      if (!initialized) {
+        int mpiInit;
+        MPI_Initialized(&mpiInit);
+        if (!mpiInit) {
+          MPI_Init(NULL, NULL);
+        }
+        MPI_Comm_size(MPI_COMM_WORLD, &mpiSize);
+        MPI_Comm_rank(MPI_COMM_WORLD, &mpiRank);
+        initialized = true;
+      }
+    }
+
+    static int GetMpiRank() {
+      InitMpi();
+      return mpiRank;
+    }
+
+    static int GetMpiSize() {
+      InitMpi();
+      return mpiSize;
+    }
+
+    static void Teardown() {
+      int finalized;
+      MPI_Finalized(&finalized);
+      if (!finalized) {
+        MPI_Finalize();
+      }
+    }
+
+    static void StartMultiNodePrinting() {
+      InitMpi();
+      for(int i = 0; i < mpiRank; i++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+      }
+    }
+
+    static void EndMultiProcessedPrinting() {
+      InitMpi();
+      for(int i = 0; i < mpiSize - mpiRank - 1; i++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+      }
+    }
+  };
+
+  // Initialize static members
+  int MultiProcessUtils::mpiRank = 0;
+  int MultiProcessUtils::mpiSize = 0;
+  bool MultiProcessUtils::initialized = false;
+#endif
 // This class manages environment variable that affect TransferBench
 class EnvVars
 {
@@ -361,6 +422,9 @@ public:
     int numGpuDevices = TransferBench::GetNumExecutors(EXE_GPU_GFX);
     std::string nicSupport = "";
 #if NIC_EXEC_ENABLED
+#if MULTINODE_RDMA
+    if(MultiProcessUtils::GetMpiRank() != 0) return;
+#endif
     nicSupport = " (with NIC support)";
 #endif
     if (!outputToCsv) {
