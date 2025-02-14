@@ -46,7 +46,7 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <filesystem>
 #include <fstream>
-#ifdef MULTINODE_RDMA
+#ifdef MULTINODE_ENABLED
 #include <mpi.h>
 #endif
 #endif
@@ -1362,7 +1362,7 @@ namespace {
     vector<set<pair<int,int>>> perIterCUs;        ///< GFX-Executor only. XCC:CU used per iteration
   };
 #ifdef NIC_EXEC_ENABLED
-#ifdef MULTINODE_RDMA
+#ifdef MULTINODE_ENABLED
   union alignas(8) RdmaMetaData
   {
     uint8_t raw[48];
@@ -2018,7 +2018,7 @@ namespace {
       return ERR_NONE;
     }
 
-  #ifdef MULTINODE_RDMA
+  #ifdef MULTINODE_ENABLED
   // TODO: Handle MPI errors in a wrapper to calls
   static ErrResult GetMPIRankAndSize(int& rank, int &size) {
     int initialized, finalized;
@@ -2029,7 +2029,7 @@ namespace {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     if(size > 2) {
-      return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
+      return {ERR_FATAL, "Multi-node RDMA is only supported for max 2 MPI Processes. Provided: %d", size};
     }
     return ERR_NONE;
   }
@@ -2161,10 +2161,10 @@ namespace {
     int commRank = 0;
     int srcNode = 0;
     int dstNode = 0;
-#ifdef MULTINODE_RDMA
+#ifdef MULTINODE_ENABLED
     ERR_CHECK(GetMPIRankAndSize(commRank, commSize));
     if(commSize == 2) dstNode = 1;
-    else return {ERR_FATAL, "Multi-node RDMA is only supported for max 2 MPI Processes"};
+    else if(commSize > 2) return {ERR_FATAL, "Multi-node RDMA is only supported for max 2 MPI Processes. Provided: %d", commSize};
 #endif
     rss.srcNode = srcNode;
     rss.dstNode = dstNode;
@@ -2270,7 +2270,7 @@ namespace {
       if(commSize == 1) {
         ERR_CHECK(ConnectSingleProcessRcQPs(cfg, i, port, rdmaAccessFlags, gidIndex, isRoCE, rss));
       }
-#ifdef MULTINODE_RDMA
+#ifdef MULTINODE_ENABLED
       else if (commSize == 2) {
         ERR_CHECK(ConnectMultiProcessRcQPs(cfg, i, port, rdmaAccessFlags, gidIndex, rss));
       }
@@ -2282,7 +2282,7 @@ namespace {
 
   static ErrResult TeardownNicTransferResources(TransferResources& rss)
   {
-#if defined(MULTINODE_RDMA) && (NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && (NIC_EXEC_ENABLED)
     // Avoid teardown before transfers at sources are successfully completed
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -2375,7 +2375,7 @@ namespace {
                                         vector<vector<float>>      const& dstReference,
                                         vector<float>&                    outputBuffer)
   {
-#if defined(MULTINODE_RDMA) && (NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && (NIC_EXEC_ENABLED)
     // Do not validate at destinations until source transfers are completed
     MPI_Barrier(MPI_COMM_WORLD);
 #endif

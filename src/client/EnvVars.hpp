@@ -57,7 +57,7 @@ using namespace TransferBench;
   #define hipGetDeviceCount                                  cudaGetDeviceCount
 #endif
 
-#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && defined(NIC_EXEC_ENABLED)
 #include <mpi.h>
   class MultiProcessUtils
   {
@@ -422,7 +422,7 @@ public:
     int numGpuDevices = TransferBench::GetNumExecutors(EXE_GPU_GFX);
     std::string nicSupport = "";
 #if NIC_EXEC_ENABLED
-#if MULTINODE_RDMA
+#if MULTINODE_ENABLED
     if(MultiProcessUtils::GetMpiRank() != 0) return;
 #endif
     nicSupport = " (with NIC support)";

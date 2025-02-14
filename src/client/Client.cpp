@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
       DisplayPresets();
     }
     DisplayTopology(ev.outputToCsv);
-#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && defined(NIC_EXEC_ENABLED)
     MultiProcessUtils::Teardown();
 #endif
     exit(0);
@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
 
   // Run preset benchmark if requested
   if (RunPreset(ev, numBytesPerTransfer, argc, argv)) {
-#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && defined(NIC_EXEC_ENABLED)
     MultiProcessUtils::Teardown();
 #endif
     exit(0);
@@ -186,14 +186,14 @@ int main(int argc, char **argv) {
       if (numBytesPerTransfer != 0 || !hasUnspecified) break;
     }
   }
-#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && defined(NIC_EXEC_ENABLED)
   MultiProcessUtils::Teardown();
 #endif
 }
 
 void DisplayUsage(char const* cmdName)
 {
-#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && defined(NIC_EXEC_ENABLED)
   if(MultiProcessUtils::GetMpiRank() != 0) return;
 #endif
   std::string nicSupport = "";
@@ -234,7 +234,7 @@ void PrintResults(EnvVars const& ev, int const testNum,
                   std::vector<Transfer> const& transfers,
                   TransferBench::TestResults const& results)
 {
-#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && defined(NIC_EXEC_ENABLED)
   MultiProcessUtils::StartMultiProcessedPrintingRegion();
 #endif
   char sep = ev.outputToCsv ? ',' : '|';
@@ -325,7 +325,7 @@ void PrintResults(EnvVars const& ev, int const testNum,
          sep, results.avgTotalDurationMsec,
          sep, results.totalBytesTransferred,
          sep, results.overheadMsec);
-#if defined(MULTINODE_RDMA) && defined(NIC_EXEC_ENABLED)
+#if defined(MULTINODE_ENABLED) && defined(NIC_EXEC_ENABLED)
   MultiProcessUtils::EndMultiProcessedPrintingRegion();
 #endif
 }

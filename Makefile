@@ -17,7 +17,7 @@ else
   EXE=TransferBench
 endif
 
-CXXFLAGS = -I$(ROCM_PATH)/include -I$(MPI_PATH)/include -DMULTINODE_RDMA -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -L$(MPI_PATH)/lib -lmpi
+CXXFLAGS = -I$(ROCM_PATH)/include -I$(MPI_PATH)/include -DMULTINODE_ENABLED -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -L$(MPI_PATH)/lib -lmpi
 #CXXFLAGS = -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
 NVFLAGS  = -x cu -lnuma -arch=native
 COMMON_FLAGS = -O3 -I./src/header -I./src/client -I./src/client/Presets
