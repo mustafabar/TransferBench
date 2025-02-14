@@ -1697,23 +1697,7 @@ namespace {
     return matches;
   }
 #endif // NIC_EXEC_ENABLED
-#if defined(NIC_EXEC_ENABLED) && defined(MULTINODE_RDMA)
-  // TODO: Handle MPI errors in a wrapper to calls
-  static ErrResult GetMPIRankAndSize(int& rank, int &size) {
-    int initialized, finalized;
-    MPI_Initialized(&initialized);
-    if (!initialized) {
-      MPI_Init(NULL, NULL);
-    }
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    if(size > 2) {
-      return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
-    }
-    return ERR_NONE;
-  }
 
-#endif
 #ifdef NIC_EXEC_ENABLED
 // IB Verbs-related functions
 //========================================================================================
@@ -1995,6 +1979,160 @@ namespace {
     return ERR_NONE;
   }
 
+  #ifdef MULTINODE_RDMA
+  // TODO: Handle MPI errors in a wrapper to calls
+  static ErrResult GetMPIRankAndSize(int& rank, int &size) {
+    int initialized, finalized;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+      MPI_Init(NULL, NULL);
+    }
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if(size > 2) {
+      return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
+    }
+    return ERR_NONE;
+  }
+  static ErrResult ConnectSingleProcessRcQPs(ConfigOptions     const& cfg,
+                                             int               const& QpIndex,
+                                             int               const& port,
+                                             uint32_t          const& rdmaAccessFlags,
+                                             uint32_t          const& gidIndex,
+                                             bool              const& isRoCE,
+                                             TransferResources      & rss) {
+    // Create SRC/DST queue pairs
+    ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[QpIndex]));
+    ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[QpIndex]));
+
+    // Initialize SRC/DST queue pairs
+    ERR_CHECK(InitQueuePair(rss.srcQueuePairs[QpIndex], port, rdmaAccessFlags));
+    ERR_CHECK(InitQueuePair(rss.dstQueuePairs[QpIndex], port, rdmaAccessFlags));
+
+    // Transition the SRC queue pair to ready to receive
+    ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[QpIndex], rss.dstPortAttr.lid,
+                                rss.dstQueuePairs[QpIndex]->qp_num,
+                                rss.dstGid.global.subnet_prefix,
+                                rss.dstGid.global.interface_id,
+                                gidIndex, port, isRoCE,
+                                rss.srcPortAttr.active_mtu));
+
+    // Transition the SRC queue pair to ready to send
+    ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[QpIndex]));
+
+    // Transition the DST queue pair to ready to receive
+    ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[QpIndex], rss.srcPortAttr.lid,
+                                rss.srcQueuePairs[QpIndex]->qp_num,
+                                rss.srcGid.global.subnet_prefix,
+                                rss.srcGid.global.interface_id,
+                                gidIndex, port, isRoCE,
+                                rss.dstPortAttr.active_mtu));
+
+    // Transition the DST queue pair to ready to send
+    ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[QpIndex]));
+    return ERR_NONE;
+  }
+  static ErrResult ConnectMultiProcessRcQPs(ConfigOptions     const& cfg,
+                                            int               const& QpIndex,
+                                            int               const& port,
+                                            uint32_t          const& rdmaAccessFlags,
+                                            uint32_t          const& gidIndex,
+                                            TransferResources      & rss) {
+
+    int mpiRank;
+    int mpiSize;
+    ERR_CHECK(GetMPIRankAndSize(mpiRank, mpiSize));
+    if(mpiSize < 2) {
+      return {ERR_FATAL, "ConnectRcQPs is only supported for Multi-processed runs"};
+    }
+    if(rss.dstNode == mpiRank) {
+      // Create SRC/DST queue pairs
+      ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[QpIndex]));
+
+      // Initialize SRC/DST queue pairs
+      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[QpIndex], port, rdmaAccessFlags));
+      RdmaMetaData localNicData;
+      RdmaMetaData remoteNicData;
+      memset(&localNicData, 0, sizeof(localNicData));
+      memset(&remoteNicData, 0, sizeof(remoteNicData));
+      // Populate local NIC data
+      localNicData.data.subnetPrefix = rss.dstGid.global.subnet_prefix;
+      localNicData.data.interfaceId = rss.dstGid.global.interface_id;
+      localNicData.data.gidIndex = gidIndex;
+      localNicData.data.portNum = port;
+      localNicData.data.lid = rss.dstPortAttr.lid;
+      localNicData.data.dstQpNum = rss.dstQueuePairs[QpIndex]->qp_num;
+      localNicData.data.linkLayer = rss.dstPortAttr.link_layer;
+      localNicData.data.remoteMemoryAddress = (uint64_t)rss.subExecParamCpu[QpIndex].dst[0];
+      localNicData.data.rKey = rss.dstMemRegion->rkey;
+      // Receive remote NIC data from the destination node
+      MPI_Status status;
+      MPI_Recv(remoteNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, rss.srcNode, 1, MPI_COMM_WORLD, &status);
+      // Send local NIC data to the destination node
+      MPI_Send(localNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, rss.srcNode, 0, MPI_COMM_WORLD);
+      if(rss.dstPortAttr.link_layer != remoteNicData.data.linkLayer) {
+        return {ERR_FATAL, "Mismatch link layer for a pair of NICs for transfer: %d", rss.transferIdx};
+      }
+      if(gidIndex != remoteNicData.data.gidIndex){
+        return {ERR_FATAL, "Mismatch NIC GID Indices. Local:%d Remote:%d \n", gidIndex, remoteNicData.data.gidIndex};
+      }
+      bool isRoCE = (remoteNicData.data.linkLayer == IBV_LINK_LAYER_ETHERNET);
+      // Transition the SRC queue pair to ready to receive
+      ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[QpIndex], remoteNicData.data.lid,
+                    remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix,
+                    remoteNicData.data.interfaceId,
+                    remoteNicData.data.gidIndex, port, isRoCE,
+                    rss.dstPortAttr.active_mtu));
+      // Transition the SRC queue pair to ready to send
+      ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[QpIndex]));
+    } else if(rss.srcNode == mpiRank) {
+      // Create SRC/DST queue pairs
+      ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[QpIndex]));
+
+      // Initialize SRC/DST queue pairs
+      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[QpIndex], port, rdmaAccessFlags));
+      RdmaMetaData localNicData;
+      RdmaMetaData remoteNicData;
+      // Populate local NIC data
+      localNicData.data.subnetPrefix = rss.srcGid.global.subnet_prefix;
+      localNicData.data.interfaceId = rss.srcGid.global.interface_id;
+      localNicData.data.gidIndex = gidIndex;
+      localNicData.data.portNum = port;
+      localNicData.data.lid = rss.srcPortAttr.lid;
+      localNicData.data.dstQpNum = rss.srcQueuePairs[QpIndex]->qp_num;
+      localNicData.data.linkLayer = rss.srcPortAttr.link_layer;
+      localNicData.data.remoteMemoryAddress = (uint64_t)rss.subExecParamCpu[QpIndex].src[0];
+      localNicData.data.rKey = rss.srcMemRegion->rkey;
+      // Send local NIC data to the destination node
+      MPI_Send(localNicData.raw, sizeof(localNicData.raw), MPI_BYTE, rss.dstNode, 1, MPI_COMM_WORLD);
+
+      // Receive remote NIC data from the destination node
+      MPI_Status status;
+      MPI_Recv(remoteNicData.raw, sizeof(localNicData.raw), MPI_BYTE, rss.dstNode, 0, MPI_COMM_WORLD, &status);
+      if(rss.srcPortAttr.link_layer != remoteNicData.data.linkLayer) {
+        return {ERR_FATAL, "Mismatch link layer for a pair of NICs for transfer: %d", rss.transferIdx};
+      }
+      if(gidIndex != remoteNicData.data.gidIndex){
+        return {ERR_FATAL, "Mismatch NIC GID Indices. Local:%d Remote:%d \n", gidIndex, remoteNicData.data.gidIndex};
+      }
+      bool isRoCE = (remoteNicData.data.linkLayer == IBV_LINK_LAYER_ETHERNET);
+      // Transition the SRC queue pair to ready to receive
+      ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[QpIndex], remoteNicData.data.lid,
+                    remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix, remoteNicData.data.interfaceId,
+                    remoteNicData.data.gidIndex, port, isRoCE,
+                    rss.srcPortAttr.active_mtu));
+
+      // Transition the SRC queue pair to ready to send
+      ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[QpIndex]));
+      rss.sendWorkRequests[QpIndex].wr.rdma.remote_addr  = remoteNicData.data.remoteMemoryAddress;
+      rss.sendWorkRequests[QpIndex].wr.rdma.rkey         = remoteNicData.data.rKey;
+    } else {
+      return {ERR_FATAL, "Source/destination node indexes are out of range for transfer: %d", rss.transferIdx};
+    }
+    return ERR_NONE;
+  }
+
+#endif
   static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
                                                ExeDevice     const& srcExeDevice,
                                                Transfer      const& t,
@@ -2024,6 +2162,7 @@ namespace {
 #ifdef MULTINODE_RDMA
     ERR_CHECK(GetMPIRankAndSize(commRank, commSize));
     if(commSize == 2) dstNode = 1;
+    else {ERR_FATAL, "Multi-node RDMA is only supported for max 2 MPI Processes"};
 #endif
     rss.srcNode = srcNode;
     rss.dstNode = dstNode;
@@ -2115,111 +2254,23 @@ namespace {
         }
       }
     }
+    int gidIndex;
+    if (commSize == 1) {
+      if(srcGidIndex != dstGidIndex) {
+        return {ERR_FATAL, "Mismatch NIC GID Indices. SRC:%d DST:%d \n", srcGidIndex, dstGidIndex};
+      }
+      gidIndex = srcGidIndex;
+    } else {
+      gidIndex = (srcNode == commRank)? srcGidIndex : dstGidIndex;
+    }
+
     for (int i = 0; i < rss.qpCount; ++i) {
       if(commSize == 1) {
-        // Create SRC/DST queue pairs
-        ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
-        ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
-
-        // Initialize SRC/DST queue pairs
-        ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
-        ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
-
-        // Transition the SRC queue pair to ready to receive
-        ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], rss.dstPortAttr.lid,
-                                    rss.dstQueuePairs[i]->qp_num,
-                                    rss.dstGid.global.subnet_prefix,
-                                    rss.dstGid.global.interface_id,
-                                    dstGidIndex, port, isRoCE,
-                                    rss.srcPortAttr.active_mtu));
-
-        // Transition the SRC queue pair to ready to send
-        ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
-
-        // Transition the DST queue pair to ready to receive
-        ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], rss.srcPortAttr.lid,
-                                    rss.srcQueuePairs[i]->qp_num,
-                                    rss.srcGid.global.subnet_prefix,
-                                    rss.srcGid.global.interface_id,
-                                    srcGidIndex, port, isRoCE,
-                                    rss.dstPortAttr.active_mtu));
-
-        // Transition the DST queue pair to ready to send
-        ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+        ERR_CHECK(ConnectSingleProcessRcQPs(cfg, i, port, rdmaAccessFlags, gidIndex, isRoCE, rss));
       }
 #ifdef MULTINODE_RDMA
       else if (commSize == 2) {
-        if(srcNode == commRank) {
-          // Create SRC/DST queue pairs
-          ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
-
-          // Initialize SRC/DST queue pairs
-          ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
-          RdmaMetaData localNicData;
-          RdmaMetaData remoteNicData;
-          // Populate local NIC data
-          localNicData.data.subnetPrefix = rss.srcGid.global.subnet_prefix;
-          localNicData.data.interfaceId = rss.srcGid.global.interface_id;
-          localNicData.data.gidIndex = srcGidIndex;
-          localNicData.data.portNum = port;
-          localNicData.data.lid = rss.srcPortAttr.lid;
-          localNicData.data.dstQpNum = rss.srcQueuePairs[i]->qp_num;
-          localNicData.data.linkLayer = rss.srcPortAttr.link_layer;
-          localNicData.data.remoteMemoryAddress = (uint64_t)rss.subExecParamCpu[i].src[0];
-          localNicData.data.rKey = rss.srcMemRegion->rkey;
-          // Send local NIC data to the destination node
-          MPI_Send(localNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 1, MPI_COMM_WORLD);
-
-          // Receive remote NIC data from the destination node
-          MPI_Status status;
-          MPI_Recv(remoteNicData.raw, sizeof(localNicData.raw), MPI_BYTE, dstNode, 0, MPI_COMM_WORLD, &status);
-          // Transition the SRC queue pair to ready to receive
-          ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], remoteNicData.data.lid,
-                        remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix, remoteNicData.data.interfaceId,
-                        remoteNicData.data.gidIndex, port, isRoCE,
-                        rss.srcPortAttr.active_mtu));
-
-          // Transition the SRC queue pair to ready to send
-          ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
-          rss.sendWorkRequests[i].wr.rdma.remote_addr  = remoteNicData.data.remoteMemoryAddress;
-          rss.sendWorkRequests[i].wr.rdma.rkey         = remoteNicData.data.rKey;
-        }
-        if(dstNode == commRank) {
-          // Create SRC/DST queue pairs
-          ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
-
-          // Initialize SRC/DST queue pairs
-          ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
-          RdmaMetaData localNicData;
-          RdmaMetaData remoteNicData;
-          memset(&localNicData, 0, sizeof(localNicData));
-          memset(&remoteNicData, 0, sizeof(remoteNicData));
-          // Populate local NIC data
-          localNicData.data.subnetPrefix = rss.dstGid.global.subnet_prefix;
-          localNicData.data.interfaceId = rss.dstGid.global.interface_id;
-          localNicData.data.gidIndex = dstGidIndex;
-          localNicData.data.portNum = port;
-          localNicData.data.lid = rss.dstPortAttr.lid;
-          localNicData.data.dstQpNum = rss.dstQueuePairs[i]->qp_num;
-          localNicData.data.linkLayer = rss.dstPortAttr.link_layer;
-          localNicData.data.remoteMemoryAddress = (uint64_t)rss.subExecParamCpu[i].dst[0];
-          localNicData.data.rKey = rss.dstMemRegion->rkey;
-          // Receive remote NIC data from the destination node
-          MPI_Status status;
-          MPI_Recv(remoteNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 1, MPI_COMM_WORLD, &status);
-          // Send local NIC data to the destination node
-          MPI_Send(localNicData.raw, sizeof(remoteNicData.raw), MPI_BYTE, srcNode, 0, MPI_COMM_WORLD);
-          // Transition the SRC queue pair to ready to receive
-          ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], remoteNicData.data.lid,
-                        remoteNicData.data.dstQpNum, remoteNicData.data.subnetPrefix,
-                        remoteNicData.data.interfaceId,
-                        remoteNicData.data.gidIndex, port, isRoCE,
-                        rss.dstPortAttr.active_mtu));
-          // Transition the SRC queue pair to ready to send
-          ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
-        }
-      } else {
-        return {ERR_FATAL, "Multi-node RDMA is only supported for 2 MPI Processes"};
+        ERR_CHECK(ConnectMultiProcessRcQPs(cfg, i, port, rdmaAccessFlags, gidIndex, rss));
       }
 #endif
     }
