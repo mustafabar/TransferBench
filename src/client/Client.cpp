@@ -24,7 +24,6 @@ THE SOFTWARE.
 #include "Presets.hpp"
 #include "Topology.hpp"
 #include <fstream>
-#include <mpi.h>
 
 int main(int argc, char **argv) {
 

@@ -1979,6 +1979,45 @@ namespace {
     return ERR_NONE;
   }
 
+  static ErrResult ConnectSingleProcessRcQPs(ConfigOptions     const& cfg,
+    int               const& QpIndex,
+    int               const& port,
+    uint32_t          const& rdmaAccessFlags,
+    uint32_t          const& gidIndex,
+    bool              const& isRoCE,
+    TransferResources      & rss) {
+      // Create SRC/DST queue pairs
+      ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[QpIndex]));
+      ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[QpIndex]));
+
+      // Initialize SRC/DST queue pairs
+      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[QpIndex], port, rdmaAccessFlags));
+      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[QpIndex], port, rdmaAccessFlags));
+
+      // Transition the SRC queue pair to ready to receive
+      ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[QpIndex], rss.dstPortAttr.lid,
+      rss.dstQueuePairs[QpIndex]->qp_num,
+      rss.dstGid.global.subnet_prefix,
+      rss.dstGid.global.interface_id,
+      gidIndex, port, isRoCE,
+      rss.srcPortAttr.active_mtu));
+
+      // Transition the SRC queue pair to ready to send
+      ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[QpIndex]));
+
+      // Transition the DST queue pair to ready to receive
+      ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[QpIndex], rss.srcPortAttr.lid,
+      rss.srcQueuePairs[QpIndex]->qp_num,
+      rss.srcGid.global.subnet_prefix,
+      rss.srcGid.global.interface_id,
+      gidIndex, port, isRoCE,
+      rss.dstPortAttr.active_mtu));
+
+      // Transition the DST queue pair to ready to send
+      ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[QpIndex]));
+      return ERR_NONE;
+    }
+
   #ifdef MULTINODE_RDMA
   // TODO: Handle MPI errors in a wrapper to calls
   static ErrResult GetMPIRankAndSize(int& rank, int &size) {
@@ -1994,44 +2033,7 @@ namespace {
     }
     return ERR_NONE;
   }
-  static ErrResult ConnectSingleProcessRcQPs(ConfigOptions     const& cfg,
-                                             int               const& QpIndex,
-                                             int               const& port,
-                                             uint32_t          const& rdmaAccessFlags,
-                                             uint32_t          const& gidIndex,
-                                             bool              const& isRoCE,
-                                             TransferResources      & rss) {
-    // Create SRC/DST queue pairs
-    ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[QpIndex]));
-    ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[QpIndex]));
 
-    // Initialize SRC/DST queue pairs
-    ERR_CHECK(InitQueuePair(rss.srcQueuePairs[QpIndex], port, rdmaAccessFlags));
-    ERR_CHECK(InitQueuePair(rss.dstQueuePairs[QpIndex], port, rdmaAccessFlags));
-
-    // Transition the SRC queue pair to ready to receive
-    ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[QpIndex], rss.dstPortAttr.lid,
-                                rss.dstQueuePairs[QpIndex]->qp_num,
-                                rss.dstGid.global.subnet_prefix,
-                                rss.dstGid.global.interface_id,
-                                gidIndex, port, isRoCE,
-                                rss.srcPortAttr.active_mtu));
-
-    // Transition the SRC queue pair to ready to send
-    ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[QpIndex]));
-
-    // Transition the DST queue pair to ready to receive
-    ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[QpIndex], rss.srcPortAttr.lid,
-                                rss.srcQueuePairs[QpIndex]->qp_num,
-                                rss.srcGid.global.subnet_prefix,
-                                rss.srcGid.global.interface_id,
-                                gidIndex, port, isRoCE,
-                                rss.dstPortAttr.active_mtu));
-
-    // Transition the DST queue pair to ready to send
-    ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[QpIndex]));
-    return ERR_NONE;
-  }
   static ErrResult ConnectMultiProcessRcQPs(ConfigOptions     const& cfg,
                                             int               const& QpIndex,
                                             int               const& port,
@@ -2280,7 +2282,10 @@ namespace {
 
   static ErrResult TeardownNicTransferResources(TransferResources& rss)
   {
+#if defined(MULTINODE_RDMA) && (NIC_EXEC_ENABLED)
+    // Avoid teardown before transfers at sources are successfully completed
     MPI_Barrier(MPI_COMM_WORLD);
+#endif
     // Deregister memory regions
     if(rss.srcMemRegion) IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
     if(rss.dstMemRegion) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
@@ -2370,7 +2375,10 @@ namespace {
                                         vector<vector<float>>      const& dstReference,
                                         vector<float>&                    outputBuffer)
   {
+#if defined(MULTINODE_RDMA) && (NIC_EXEC_ENABLED)
+    // Do not validate at destinations until source transfers are completed
     MPI_Barrier(MPI_COMM_WORLD);
+#endif
     float* output;
     size_t initOffset = cfg.data.byteOffset / sizeof(float);
     for (auto rss : transferResources) {
