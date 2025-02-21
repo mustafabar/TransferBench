@@ -1980,12 +1980,12 @@ namespace {
   }
 
   static ErrResult ConnectSingleProcessRcQPs(ConfigOptions     const& cfg,
-    int               const& QpIndex,
-    int               const& port,
-    uint32_t          const& rdmaAccessFlags,
-    uint32_t          const& gidIndex,
-    bool              const& isRoCE,
-    TransferResources      & rss) {
+                                             int               const& QpIndex,
+                                             int               const& port,
+                                             uint32_t          const& rdmaAccessFlags,
+                                             uint32_t          const& gidIndex,
+                                             bool              const& isRoCE,
+                                             TransferResources      & rss) {
       // Create SRC/DST queue pairs
       ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[QpIndex]));
       ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[QpIndex]));
