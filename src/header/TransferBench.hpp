@@ -3083,6 +3083,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (stopEvent != NULL)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
+    int minGridSize, bSize;
+    hipError_t err = hipOccupancyMaxPotentialBlockSize(&minGridSize, &bSize, gpuKernel, 0, 0);
+    if (err != hipSuccess) {
+      printf("hipOccupancyMaxPotentialBlockSize failed: %s\n", hipGetErrorString(err));
+    } else {
+      printf("hipOccupancyMaxPotentialBlockSize: minGridSize = %d, blockSize.x = %d\n", minGridSize, bSize);
+    }
     hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream, startEvent, stopEvent,
                           0, rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
@@ -3161,6 +3168,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
+      int minGridSize, bSize;
+      hipError_t err = hipOccupancyMaxPotentialBlockSize(&minGridSize, &bSize, gpuKernel, 0, 0);
+      if (err != hipSuccess) {
+        printf("hipOccupancyMaxPotentialBlockSize failed: %s\n", hipGetErrorString(err));
+      } else {
+        printf("hipOccupancyMaxPotentialBlockSize: minGridSize = %d, blockSize.x = %d\n", minGridSize, bSize);
+      }
       hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
                             cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                             cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
