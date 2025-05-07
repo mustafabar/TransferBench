@@ -2811,11 +2811,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       size_t const loop1Limit  = numPackedFloat / loop1Stride * loop1Stride;
       {
         PACKED_FLOAT val[UNROLL];
-        if (numSrcs == 0) {
-          #pragma unroll
-          for (int u = 0; u < UNROLL; u++)
-            val[u] = MemsetVal<PACKED_FLOAT>();
-        }
 
         for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride) {
           // Read sources into memory and accumulate in registers
@@ -2840,7 +2835,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       {
         if (loop1Limit < numPackedFloat) {
           PACKED_FLOAT val;
-          if (numSrcs == 0) val = MemsetVal<PACKED_FLOAT>();
 
           size_t const loop2Stride = nTeams * nWaves * warpSize;
           for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx;
@@ -2860,7 +2854,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       {
         if (numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) < p.N) {
           float val;
-          if (numSrcs == 0) val = MemsetVal<float>();
 
           size_t const loop3Stride = nTeams * nWaves * warpSize;
           for (size_t idx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
@@ -2870,6 +2863,115 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                 val += p.src[s][idx];
             }
 
+            for (int d = 0; d < numDsts; d++)
+              p.dst[d][idx] = val;
+          }
+        }
+      }
+
+      if (++subIterations == numSubIterations) break;
+    }
+
+    // Wait for all threads to finish
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      __threadfence_system();
+      p.stopCycle  = GetTimestamp();
+      p.startCycle = startCycle;
+      GetHwId(p.hwId);
+      GetXccId(p.xccId);
+    }
+  }
+
+
+  // Kernel for GFX execution
+  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL>
+  __global__ void __launch_bounds__(BLOCKSIZE)
+    GpuReduceKernelNoSrc(SubExecParam* params, int waveOrder, int numSubIterations)
+  {
+    int64_t startCycle;
+    if (threadIdx.x == 0) startCycle = GetTimestamp();
+
+    SubExecParam& p = params[blockIdx.y];
+
+    // Filter by XCC
+#if !defined(__NVCC__)
+    int32_t xccId;
+    GetXccId(xccId);
+    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
+#endif
+
+    // Collect data information
+    int32_t const  numSrcs  = p.numSrcs;
+    int32_t const  numDsts  = p.numDsts;
+    PACKED_FLOAT const* __restrict__ srcFloatPacked[MAX_SRCS];
+    PACKED_FLOAT*       __restrict__ dstFloatPacked[MAX_DSTS];
+    for (int i = 0; i < numSrcs; i++) srcFloatPacked[i] = (PACKED_FLOAT const*)p.src[i];
+    for (int i = 0; i < numDsts; i++) dstFloatPacked[i] = (PACKED_FLOAT*)p.dst[i];
+
+    // Operate on wavefront granularity
+    int32_t const nTeams   = p.teamSize;             // Number of threadblocks working together on this subarray
+    int32_t const teamIdx  = p.teamIdx;              // Index of this threadblock within the team
+    int32_t const nWaves   = BLOCKSIZE   / warpSize; // Number of wavefronts within this threadblock
+    int32_t const waveIdx  = threadIdx.x / warpSize; // Index of this wavefront within the threadblock
+    int32_t const tIdx     = threadIdx.x % warpSize; // Thread index within wavefront
+
+    size_t  const numPackedFloat = p.N / (sizeof(PACKED_FLOAT)/sizeof(float));
+
+    int32_t teamStride, waveStride, unrlStride, teamStride2, waveStride2;
+    switch (waveOrder) {
+    case 0: /* U,W,C */ unrlStride = 1; waveStride = UNROLL; teamStride = UNROLL * nWaves;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+    case 1: /* U,C,W */ unrlStride = 1; teamStride = UNROLL; waveStride = UNROLL * nTeams;  teamStride2 = 1;      waveStride2 = nTeams; break;
+    case 2: /* W,U,C */ waveStride = 1; unrlStride = nWaves; teamStride = nWaves * UNROLL;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+    case 3: /* W,C,U */ waveStride = 1; teamStride = nWaves; unrlStride = nWaves * nTeams;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+    case 4: /* C,U,W */ teamStride = 1; unrlStride = nTeams; waveStride = nTeams * UNROLL;  teamStride2 = 1;      waveStride2 = nTeams; break;
+    case 5: /* C,W,U */ teamStride = 1; waveStride = nTeams; unrlStride = nTeams * nWaves;  teamStride2 = 1;      waveStride2 = nTeams; break;
+    }
+
+    int subIterations = 0;
+    while (1) {
+      // First loop: Each wavefront in the team works on UNROLL PACKED_FLOAT per thread
+      size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
+      size_t const loop1Limit  = numPackedFloat / loop1Stride * loop1Stride;
+      {
+        PACKED_FLOAT val[UNROLL];
+
+        #pragma unroll
+        for (int u = 0; u < UNROLL; u++)
+          val[u] = MemsetVal<PACKED_FLOAT>();
+
+
+        for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride) {
+          // Write accumulation to all outputs
+          for (int d = 0; d < numDsts; d++) {
+            #pragma unroll
+            for (int u = 0; u < UNROLL; u++)
+              dstFloatPacked[d][idx + u * unrlStride * warpSize] = val[u];
+          }
+        }
+      }
+
+      // Second loop: Deal with remaining PACKED_FLOAT
+      {
+        if (loop1Limit < numPackedFloat) {
+          PACKED_FLOAT val = MemsetVal<PACKED_FLOAT>();
+
+          size_t const loop2Stride = nTeams * nWaves * warpSize;
+          for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx;
+               idx < numPackedFloat; idx += loop2Stride) {
+            for (int d = 0; d < numDsts; d++)
+              dstFloatPacked[d][idx] = val;
+          }
+        }
+      }
+
+      // Third loop; Deal with remaining floats
+      {
+        if (numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) < p.N) {
+          float val = MemsetVal<float>();
+
+          size_t const loop3Stride = nTeams * nWaves * warpSize;
+          for (size_t idx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
             for (int d = 0; d < numDsts; d++)
               p.dst[d][idx] = val;
           }
@@ -2918,8 +3020,40 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     GPU_KERNEL_UNROLL_DECL(448),
     GPU_KERNEL_UNROLL_DECL(512)
   };
-  #undef GPU_KERNEL_UNROLL_DECL
 
+
+
+  #define GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, UNROLL) \
+  {GpuReduceKernelNoSrc<float,  BLOCKSIZE, UNROLL>,   \
+   GpuReduceKernelNoSrc<float2, BLOCKSIZE, UNROLL>,   \
+   GpuReduceKernelNoSrc<float4, BLOCKSIZE, UNROLL>}
+
+#define GPU_KERNEL_UNROLL_DECL_NOSRC(BLOCKSIZE)    \
+  {GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 1),      \
+   GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 2),      \
+   GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 3),      \
+   GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 4),      \
+   GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 5),      \
+   GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 6),      \
+   GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 7),      \
+   GPU_KERNEL_DWORD_DECL_NOSRC(BLOCKSIZE, 8)}
+
+  // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size)
+  typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int);
+  GpuKernelFuncPtr GpuKernelTableNoSrc[MAX_WAVEGROUPS][MAX_UNROLL][3] =
+  {
+    GPU_KERNEL_UNROLL_DECL_NOSRC(64),
+    GPU_KERNEL_UNROLL_DECL_NOSRC(128),
+    GPU_KERNEL_UNROLL_DECL_NOSRC(192),
+    GPU_KERNEL_UNROLL_DECL_NOSRC(256),
+    GPU_KERNEL_UNROLL_DECL_NOSRC(320),
+    GPU_KERNEL_UNROLL_DECL_NOSRC(384),
+    GPU_KERNEL_UNROLL_DECL_NOSRC(448),
+    GPU_KERNEL_UNROLL_DECL_NOSRC(512)
+  };
+
+  #undef GPU_KERNEL_UNROLL_DECL
+  #undef GPU_KERNEL_UNROLL_DECL_NOSRC
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
                                       hipStream_t   const  stream,
@@ -2938,7 +3072,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                       cfg.gfx.wordSize == 2 ? 1 :
                                               2;
-    auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
+    auto gpuKernel =
+    (rss.subExecParamGpuPtr[0].numSrcs)? GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx] :
+                                        GpuKernelTableNoSrc[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
 
 #if defined(__NVCC__)
     if (startEvent != NULL)
