@@ -2853,7 +2853,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Third loop; Deal with remaining floats
       {
         if (numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) < p.N) {
-          // float val;
+          float val;
 
           size_t const loop3Stride = nTeams * nWaves * warpSize;
           for (size_t idx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
@@ -2864,7 +2864,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 
             for (int d = 0; d < numDsts; d++)
-              p.dst[d][idx] =  p.src[0][idx];
+              p.dst[d][idx] = val;
           }
         }
       }
