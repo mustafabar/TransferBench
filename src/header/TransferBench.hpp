@@ -2814,13 +2814,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride) {
           // Read sources into memory and accumulate in registers
-          if (numSrcs) {
+          #pragma unroll
+          for (int u = 0; u < UNROLL; u++)
+            val[u] = srcFloatPacked[0][idx + u * unrlStride * warpSize];
+          for (int s = 1; s < numSrcs; s++)
+            #pragma unroll
             for (int u = 0; u < UNROLL; u++)
-              val[u] = srcFloatPacked[0][idx + u * unrlStride * warpSize];
-            for (int s = 1; s < numSrcs; s++)
-              for (int u = 0; u < UNROLL; u++)
-                val[u] += srcFloatPacked[s][idx + u * unrlStride * warpSize];
-          }
+              val[u] += srcFloatPacked[s][idx + u * unrlStride * warpSize];
 
           // Write accumulation to all outputs
           for (int d = 0; d < numDsts; d++) {
@@ -2839,11 +2839,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           size_t const loop2Stride = nTeams * nWaves * warpSize;
           for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx;
                idx < numPackedFloat; idx += loop2Stride) {
-            if (numSrcs) {
-              val = srcFloatPacked[0][idx];
-              for (int s = 1; s < numSrcs; s++)
-                val += srcFloatPacked[s][idx];
-            }
+
+            val = srcFloatPacked[0][idx];
+            for (int s = 1; s < numSrcs; s++)
+              val += srcFloatPacked[s][idx];
+
             for (int d = 0; d < numDsts; d++)
               dstFloatPacked[d][idx] = val;
           }
@@ -2857,11 +2857,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
           size_t const loop3Stride = nTeams * nWaves * warpSize;
           for (size_t idx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
-            if (numSrcs) {
-              val = p.src[0][idx];
-              for (int s = 1; s < numSrcs; s++)
-                val += p.src[s][idx];
-            }
+
+            val = p.src[0][idx];
+            for (int s = 1; s < numSrcs; s++)
+              val += p.src[s][idx];
+
 
             for (int d = 0; d < numDsts; d++)
               p.dst[d][idx] = val;
@@ -3150,7 +3150,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                         cfg.gfx.wordSize == 2 ? 1 :
                                                 2;
-      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
+      auto gpuKernel = (exeInfo.subExecParamGpu[0].numSrcs)?
+                        GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx]:
+                        GpuKernelTableNoSrc[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
 
 #if defined(__NVCC__)
       if (cfg.gfx.useHipEvents)
